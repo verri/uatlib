@@ -7,8 +7,10 @@
 #include <uat/agent.hpp>
 
 #include <deque>
+#include <iterator>
 #include <optional>
 #include <random>
+#include <type_traits>
 #include <vector>
 
 #include <cool/compose.hpp>
@@ -17,7 +19,20 @@ namespace uat
 {
 
 //! A function type that generates agents for each iteration.
-using factory_t = std::function<std::vector<any_agent>(uint_t, int)>;
+struct factory_t : std::function<std::vector<any_agent>(uint_t, int)>
+{
+  using std::function<std::vector<any_agent>(uint_t, int)>::function;
+  using std::function<std::vector<any_agent>(uint_t, int)>::operator=;
+  using std::function<std::vector<any_agent>(uint_t, int)>::operator();
+
+  template <std::invocable<uint_t, int> F>
+  requires agent_compatible<typename std::invoke_result_t<F, uint_t, int>::value_type> factory_t(F f)
+    : std::function<std::vector<any_agent>(uint_t, int)>{[f = std::move(f)](uint_t time, int seed) {
+        auto v = f(time, seed);
+        return std::vector<any_agent>(std::move_iterator(v.begin()), std::move_iterator(v.end()));
+      }}
+  {}
+};
 
 //! Type to represent the information in a trade transaction.
 template <region_compatible R> struct trade_info_t
@@ -92,6 +107,11 @@ using agent_private_status_t = std::variant<agent_private_status::inactive, agen
 class agents_private_status_t
 {
 public:
+  agents_private_status_t() = default;
+
+  agents_private_status_t(const agents_private_status_t&) = delete;
+  auto operator=(const agents_private_status_t&) -> agents_private_status_t& = delete;
+
   auto status(id_t) const -> agent_private_status_t; //!< Get the private status of an agent with the given id.
   auto active_count() const -> uint_t;               //!< Get the number of active agents.
   auto active() const -> std::span<const id_t>;      //!< Get the ids of the active agents.
@@ -127,6 +147,7 @@ struct time_threshold_t
 {
   uint_t t;
 };
+
 } // namespace stop_criterion
 
 //! Variant that represents the possible stop criteria for the simulation.
@@ -199,16 +220,19 @@ template <region_compatible R> auto simulate(const simulation_opts_t<R>& opts = 
                       opts.stop_criterion);
   };
 
-  do {
-    if (opts.simulation_callback)
-      opts.simulation_callback(t0, std::as_const(agents), permit_private_status_fn(safe_book));
-
+  while (true) {
     // Generate new agents
     if (opts.factory) {
       auto new_agents = opts.factory(t0, rnd());
       for (auto& agent : new_agents)
         agents.insert(std::move(agent));
     }
+
+    if (opts.simulation_callback)
+      opts.simulation_callback(t0, std::as_const(agents), permit_private_status_fn(safe_book));
+
+    if (stop())
+      break;
 
     {
       // Bid phase
@@ -297,7 +321,7 @@ template <region_compatible R> auto simulate(const simulation_opts_t<R>& opts = 
     if (data.size() > 0)
       data.pop_front();
     ++t0;
-  } while (!stop());
+  }
 }
 
 } // namespace uat
